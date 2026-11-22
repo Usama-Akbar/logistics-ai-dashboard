@@ -8,7 +8,7 @@ A web app for exploring one logistics dataset (400 orders, 2025) in three ways:
 | Diagnostic | **Ask the data** tab | Natural-language questions → validated query plan → computed answer + chart + explanation |
 | Predictive / prescriptive | **Forecast** tab, or ask e.g. "How much inventory should I plan?" | Monthly demand forecast, backtested method selection, safety-stock inventory recommendation |
 
-**Live app:** `<deployed URL>` — no login required.
+**Live app:** https://logistics-ai-dashboard-five.vercel.app — no login required.
 
 **Core rule:** the AI model only *interprets* questions. It picks a tool and fills a strict schema; the app validates that plan, computes the result in TypeScript, and writes the answer itself. The model never sees the data rows, never writes SQL, and its free text is never shown as an answer.
 
@@ -22,7 +22,7 @@ Requirements: Node 20+.
 npm install
 cp .env.example .env.local     # add GROQ_API_KEY (free at console.groq.com/keys)
 npm run dev                     # http://localhost:3000
-npm test                        # 36 unit tests (engine, time logic, forecasting, orchestration)
+npm test                        # 38 unit tests (engine, time logic, forecasting, orchestration)
 ```
 
 Docker:
@@ -38,7 +38,7 @@ docker run -p 3000:3000 -e GROQ_API_KEY=gsk_... logistics-analytics
 |---|---|---|---|
 | `GROQ_API_KEY` | For the Ask tab | — | Groq API key (the free tier is enough for review traffic). Without it the Ask tab says so; the Dashboard and Forecast tabs still work. |
 | `GROQ_MODEL` | No | `openai/gpt-oss-120b` | Groq model that interprets questions. Must support tool calling. |
-| `GROQ_FALLBACK_MODELS` | No | `openai/gpt-oss-20b` | Comma-separated models tried, in order, when the primary model is rate-limited or unavailable |
+| `GROQ_FALLBACK_MODELS` | No | `openai/gpt-oss-20b,qwen/qwen3.8-27b` | Comma-separated models tried, in order, when the primary model is rate-limited or unavailable |
 | `AI_EFFORT` | No | `low` | Reasoning effort for gpt-oss models (`low` ≈ 1 s per question; `medium` is slower with no accuracy gain in testing) |
 | `ASK_RATE_LIMIT` | No | `20` | Questions per IP per minute, per server instance |
 
@@ -128,7 +128,13 @@ Browser (React, Recharts)
 
 `query_analytics` takes a list of 1–3 queries, so a compound question ("on-time rate for FedEx and average delivery time by region") is answered in one call, and each query becomes its own answer card. An earlier version relied on parallel tool calls, but the model rarely made them, so the second half of compound questions was dropped.
 
-**Rate limits and fallback.** Groq's free tier limits tokens per minute per model, and one question uses about 2,500 tokens. When the primary model returns 429 (or a 5xx/network error), the orchestrator immediately retries the same request on the next model in `GROQ_FALLBACK_MODELS` instead of waiting for the window to reset. Each model has its own quota. The trace shows which model answered.
+**Rate limits and fallback.** Groq's free tier limits tokens per minute per model, counts `max_tokens` against that limit, and one question uses about 2,500 input tokens. So:
+- `max_tokens` is kept small (1,024; 600 for Qwen), since a tool call needs only a few hundred.
+- When a model returns 429, a 5xx, a network error, or Groq's own `tool_use_failed` (the model produced malformed tool-call JSON), the same request goes straight to the next model: `gpt-oss-120b` → `gpt-oss-20b` → `qwen3.8-27b`. Each has its own quota.
+- If all three are rate-limited and Groq's `retry-after` is 20 s or less, the server waits once and retries instead of failing.
+- The trace shows which model answered.
+
+In testing, a burst of 8 questions in about 15 s was answered without errors.
 
 ### Forecasting
 
@@ -158,7 +164,8 @@ Browser (React, Recharts)
 - No period-over-period comparison in one plan (e.g. "Nov vs Oct change"). The model would need two calls.
 - Forecasts are univariate. They ignore promotions, seasonality (one year of data can't estimate it) and lead times, and the safety-stock formula assumes roughly normal, independent errors.
 - The plan cache and rate limiter are in memory and per serverless instance (fine for a demo, not shared across instances).
-- On Groq's free tier, heavy simultaneous use (more than ~5 new questions a minute across all users) can exhaust both models' quotas; the Ask tab then shows a "rate-limited, try again shortly" message. Repeated questions are served from the plan cache and use no quota. A paid Groq tier removes this.
+- On Groq's free tier, sustained heavy use (roughly more than 8 new questions a minute across all users) can exhaust all three models' quotas; the Ask tab then shows a "rate-limited, try again shortly" message. Repeated questions are served from the plan cache and use no quota. A paid Groq tier removes this.
+- The fallback models are smaller and occasionally answer only one part of a compound question; the primary model handles these reliably.
 - No authentication. The public endpoint is protected by input limits and per-IP rate limiting only.
 
 ## Future improvements

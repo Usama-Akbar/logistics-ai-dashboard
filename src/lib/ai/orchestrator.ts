@@ -20,13 +20,25 @@ export const MODEL = process.env.GROQ_MODEL ?? "openai/gpt-oss-120b";
  * Groq's free tier limits tokens per minute per model. When the primary model is rate-limited we
  * move to the next model (each has its own quota) instead of making the user wait for the window to reset.
  */
-const FALLBACK_MODELS = (process.env.GROQ_FALLBACK_MODELS ?? "openai/gpt-oss-20b")
+const FALLBACK_MODELS = (process.env.GROQ_FALLBACK_MODELS ?? "openai/gpt-oss-20b,qwen/qwen3.8-27b")
   .split(",")
   .map((m) => m.trim())
   .filter(Boolean);
 export const MODELS = [MODEL, ...FALLBACK_MODELS.filter((m) => m !== MODEL)];
 const EFFORT = (process.env.AI_EFFORT ?? "low") as "low" | "medium" | "high";
 const MAX_ATTEMPTS = 3;
+/** Longest we'll wait for a Groq quota window to reset before giving up (route maxDuration is 60 s). */
+const MAX_WAIT_SEC = 20;
+
+/**
+ * Per-model request settings. max_tokens is kept small on purpose: Groq counts it against the
+ * per-minute token quota, and a tool call needs only a few hundred tokens.
+ */
+function modelParams(model: string) {
+  if (model.startsWith("openai/gpt-oss")) return { model, max_tokens: 1024, reasoning_effort: EFFORT };
+  if (model.startsWith("qwen/")) return { model, max_tokens: 600, reasoning_effort: "none" as const };
+  return { model, max_tokens: 1024 };
+}
 const MAX_TOOL_CALLS = 3;
 
 export type Card =
@@ -203,31 +215,33 @@ export async function ask(question: string, prior?: PriorTurn | null): Promise<A
   }
   return done([], MAX_ATTEMPTS);
 
-  /** One completion, trying each model in turn while the previous one is rate-limited. */
+  /**
+   * One completion. Tries each model in turn while the previous one is rate-limited or unavailable.
+   * If every model is rate-limited and the quota resets soon, waits once and tries again rather than failing.
+   */
   async function complete(msgs: ChatCompletionMessageParam[]) {
     let lastError: unknown;
-    for (const model of MODELS) {
-      try {
-        const res = await client!.chat.completions.create(
-          {
-            model,
-            messages: msgs,
-            tools: TOOLS,
-            tool_choice: "auto",
-            parallel_tool_calls: true,
-            temperature: 0,
-            max_tokens: 2048,
-            ...(model.startsWith("openai/gpt-oss") ? { reasoning_effort: EFFORT } : {}),
-          },
-          { maxRetries: 0 },
-        );
-        modelUsed = model;
-        return res;
-      } catch (e) {
-        // Quota, provider outage or network failure on this model -> try the next one.
-        if (!(e instanceof Groq.RateLimitError || e instanceof Groq.InternalServerError || e instanceof Groq.APIConnectionError)) throw e;
-        lastError = e;
+    for (let round = 0; round < 2; round++) {
+      let soonestResetSec = Infinity;
+      for (const model of MODELS) {
+        try {
+          const res = await client!.chat.completions.create({ ...modelParams(model), messages: msgs, tools: TOOLS, tool_choice: "auto", parallel_tool_calls: true, temperature: 0 }, { maxRetries: 0 });
+          modelUsed = model;
+          return res;
+        } catch (e) {
+          // Quota, provider outage, network failure, or Groq rejecting the model's own malformed
+          // tool-call JSON (400 tool_use_failed) -> try the next model.
+          const malformedToolCall = e instanceof Groq.BadRequestError && /tool_use_failed|parse tool call/i.test(e.message);
+          if (!(malformedToolCall || e instanceof Groq.RateLimitError || e instanceof Groq.InternalServerError || e instanceof Groq.APIConnectionError)) throw e;
+          lastError = e;
+          if (e instanceof Groq.RateLimitError) {
+            const retryAfter = Number.parseFloat(e.headers?.get("retry-after") ?? "");
+            if (Number.isFinite(retryAfter)) soonestResetSec = Math.min(soonestResetSec, retryAfter);
+          }
+        }
       }
+      if (round === 0 && soonestResetSec <= MAX_WAIT_SEC) await new Promise((r) => setTimeout(r, soonestResetSec * 1000 + 250));
+      else break;
     }
     throw lastError;
   }

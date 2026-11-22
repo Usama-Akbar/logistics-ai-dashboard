@@ -16,6 +16,7 @@ vi.mock("groq-sdk", () => {
     static InternalServerError = class extends APIError {};
     static APIConnectionError = class extends APIError {};
     static AuthenticationError = class extends APIError {};
+    static BadRequestError = class extends APIError {};
     chat = { completions: { create } };
   }
   return { default: Groq };
@@ -121,6 +122,25 @@ describe("orchestration", () => {
     const models = create.mock.calls.map((c) => (c[0] as { model: string }).model);
     expect(models).toEqual([MODELS[0], MODELS[1]]);
     expect(r.trace.model).toBe(MODELS[1]);
+    expect(r.cards[0].type).toBe("query");
+  });
+
+  it("moves to the next model when Groq rejects malformed tool-call JSON", async () => {
+    const BR = (Groq as unknown as { BadRequestError: new (m: string) => Error }).BadRequestError;
+    queue.push(new BR('400 {"error":{"message":"Failed to parse tool call arguments as JSON","code":"tool_use_failed"}}'));
+    queue.push(reply(toolUse("query_analytics", { queries: [q()] })));
+    const r = await ask("Which carriers are most often late?");
+    expect(r.trace.model).toBe(MODELS[1]);
+    expect(r.cards[0].type).toBe("query");
+  });
+
+  it("waits for a short quota reset when every model is rate-limited, then retries", async () => {
+    const RL = (Groq as unknown as { RateLimitError: new (m: string) => Error & { headers?: Headers } }).RateLimitError;
+    MODELS.forEach(() => queue.push(Object.assign(new RL("429"), { headers: new Headers({ "retry-after": "0" }) })));
+    queue.push(reply(toolUse("query_analytics", { queries: [q()] })));
+    const r = await ask("Delay rate ranking across carriers");
+    expect(create).toHaveBeenCalledTimes(MODELS.length + 1);
+    expect(r.trace.model).toBe(MODELS[0]);
     expect(r.cards[0].type).toBe("query");
   });
 

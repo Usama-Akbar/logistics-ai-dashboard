@@ -14,6 +14,8 @@ export function buildSystemPrompt(ds: Dataset): string {
     const vals = knownValues(d, ds.orders);
     if (d === "sku") return `- sku: ${vals.length} distinct codes shaped like CATEGORY-NNNN (e.g. ${vals.slice(0, 3).join(", ")}).`;
     if (d === "client_id") return `- client_id: ${vals.length} clients, ${vals[0]} … ${vals[vals.length - 1]}.`;
+    // City names alone (the engine matches "Leeds" to "Leeds, UK"), which keeps the prompt short.
+    if (d === "destination_city" || d === "origin_city") return `- ${d} (suffix optional): ${vals.map((v) => v.split(",")[0]).join(" | ")}`;
     return `- ${d}: ${vals.join(" | ")}`;
   }).join("\n");
 
@@ -40,13 +42,13 @@ ${dimLines}
 
 ## Time handling
 - "last month" -> preset previous_month. "this month" -> current_month. "last N months/weeks/days" -> last_n_months/last_n_weeks/last_n_days with n. "last quarter" -> previous_quarter. Named months, quarters or years (e.g. "in March", "Q3") -> custom with start/end inside 2025 unless another year is stated.
-- date_field: use delivery_date when the question is about when things were delivered (e.g. "delivered late last month"); otherwise order_date.
+- date_field: if the question says "delivered" or "deliveries" together with a time period (e.g. "how many orders were delivered late last month", "deliveries in March"), use delivery_date. Otherwise ("orders placed", "orders", "shipments" with no delivery wording) use order_date.
 - "by week/month/day/quarter", "over time", "trend" -> group_by that time grain (default month for "over time").
 
 ## Other rules
 - "Which X has the highest/lowest Y" -> group_by X, metrics [Y], sort desc/asc (limit null so the app can show the full ranking).
 - "top N" -> limit N.
-- Use exact catalog values in filters (cities include the suffix, e.g. "Leeds, UK").
+- Use exact catalog values in filters. City names may be given with or without their suffix ("Leeds" or "Leeds, UK").
 - Forecasts: horizon_months defaults to 3 when unspecified; method "auto" unless the user names one; service_level null unless the user states one.
 - intent_summary must restate the request without any numbers about the data.
 - If the user's message refers to a previous question ("now by month", "what about UPS?"), use the provided previous-question context to build a complete standalone call.`;
