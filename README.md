@@ -178,8 +178,3 @@ In testing, a burst of 8 questions in about 15 s was answered without errors.
 - Saved queries and pinning answers to the dashboard.
 
 ---
-
-## AI usage disclosure
-
-- **In the product:** an LLM served by Groq (`openai/gpt-oss-120b` by default) interprets natural-language questions into structured tool calls, as described above. It doesn't compute or write answers.
-- **In development:** this project was built with an AI coding assistant (Claude Code, by Anthropic), which helped with scaffolding, implementation, tests and this README. Design decisions, metric definitions and expected test values were checked against the raw CSV with an independent script. The unit tests in `tests/` pin the key numbers (400 orders, 304 delivered, 55 delayed, 82.2% on time, 3.83 days average, GLS 2/8 delay rate, 3 late deliveries in Nov 2025).
